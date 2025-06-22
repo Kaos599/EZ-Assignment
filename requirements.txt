@@ -9,3 +9,5 @@ python-dotenv==1.1.0
 Requests==2.32.4
 streamlit==1.44.1
 uvicorn==0.34.3
+pymongo==4.10.1
+motor==3.7.0

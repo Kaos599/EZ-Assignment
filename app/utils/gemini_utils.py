@@ -1,8 +1,8 @@
 import os
 import google.generativeai as genai
 from google.generativeai.types import GenerateContentResponse
-from fastapi import HTTPException # For raising HTTP exceptions back to FastAPI
-import json # Ensure json is imported
+from fastapi import HTTPException 
+import json 
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -37,8 +37,6 @@ async def generate_text_from_gemini(prompt: str, is_json_response: bool = False)
 
         if is_json_response:
             generation_config.response_mime_type = "application/json"
-            # The prompt needs to be crafted to make the model output JSON.
-            # Example: f"Extract information and respond in JSON format: {prompt}"
 
         response: GenerateContentResponse = await model.generate_content_async(
             contents=[prompt],
@@ -48,7 +46,6 @@ async def generate_text_from_gemini(prompt: str, is_json_response: bool = False)
         return response.text
     except Exception as e:
         print(f"Error during Gemini API call: {e}")
-        # Raise an HTTPException so FastAPI can handle it and return a proper error response
         raise HTTPException(status_code=500, detail=f"Gemini API error: {str(e)}")
 
 
@@ -56,11 +53,8 @@ async def generate_summary(document_text: str, max_words: int = 150) -> str:
     """
     Generates a summary for the given document text using the Gemini API.
     """
-    # Limit input length to manage token usage for summaries and overall performance
-    # The exact limit might depend on the model's context window and typical document sizes.
-    # 10000 characters is an arbitrary starting point.
     effective_document_text = document_text
-    if len(document_text) > 20000: # Increased limit slightly
+    if len(document_text) > 20000:
         print(f"Document text truncated for summary generation from {len(document_text)} to 20000 characters.")
         effective_document_text = document_text[:20000]
 
@@ -87,7 +81,7 @@ async def generate_challenge_questions(document_text: str, num_questions: int = 
 
     Returns a dictionary: {"questions": [{"id": 1, "text": "..."}, {"id": 2, "text": "..."}, ...]}
     """
-    MAX_DOC_LENGTH_FOR_CHALLENGE = 50000 # Similar to QA, needs good context
+    MAX_DOC_LENGTH_FOR_CHALLENGE = 50000 
     effective_document_text = document_text
     if len(document_text) > MAX_DOC_LENGTH_FOR_CHALLENGE:
         print(f"Document text truncated for challenge question generation from {len(document_text)} to {MAX_DOC_LENGTH_FOR_CHALLENGE} characters.")
@@ -133,22 +127,22 @@ Response (JSON):
         parsed_response = json.loads(raw_response_text)
         if not isinstance(parsed_response, dict) or "questions" not in parsed_response or not isinstance(parsed_response["questions"], list):
             print(f"Warning: Gemini response for challenge questions was not in the expected JSON format. Raw: {raw_response_text}")
-            # Fallback: try to return raw text if parsing fails, so it can be inspected
+          
             return {"error": "Failed to parse questions.", "raw_response": raw_response_text}
 
-        # Validate structure of each question
+
         valid_questions = []
         for i, q_data in enumerate(parsed_response["questions"]):
             if isinstance(q_data, dict) and "text" in q_data:
                 valid_questions.append({"id": q_data.get("id", i + 1), "text": q_data["text"]})
             else:
-                # Handle malformed question object
+
                 print(f"Warning: Malformed question object in response: {q_data}")
                 valid_questions.append({"id": i + 1, "text": "Error: Malformed question data."})
 
         if len(valid_questions) != num_questions and not valid_questions[0].get("text","").startswith("Error"):
              print(f"Warning: Expected {num_questions} questions, but received {len(valid_questions)}. Raw: {raw_response_text}")
-             # We can still return what we got, or handle it more strictly.
+
 
         return {"questions": valid_questions}
 
@@ -167,7 +161,7 @@ async def evaluate_user_answer(document_text: str, original_question: str, user_
 
     Returns a dictionary: {"feedback": "...", "justification": "...", "is_correct": true/false} (example structure)
     """
-    MAX_DOC_LENGTH_FOR_EVAL = 50000 # Consistent with other context-heavy operations
+    MAX_DOC_LENGTH_FOR_EVAL = 50000 
     effective_document_text = document_text
     if len(document_text) > MAX_DOC_LENGTH_FOR_EVAL:
         print(f"Document text truncated for answer evaluation from {len(document_text)} to {MAX_DOC_LENGTH_FOR_EVAL} characters.")
@@ -220,21 +214,21 @@ Response (JSON):
             print(f"Warning: Gemini response for answer evaluation was not in the expected JSON format. Raw: {raw_response_text}")
             return {"error": "Failed to parse evaluation.", "raw_response": raw_response_text, "is_correct": False, "feedback": "Error: Could not parse assistant's evaluation.", "justification": "Raw response: " + raw_response_text}
 
-        # Ensure 'is_correct' is a boolean
+
         if not isinstance(parsed_response["is_correct"], bool):
-            # Attempt to coerce if it's a string like "true" or "false"
+           
             if isinstance(parsed_response["is_correct"], str):
                 if parsed_response["is_correct"].lower() == "true":
                     parsed_response["is_correct"] = True
                 elif parsed_response["is_correct"].lower() == "false":
                     parsed_response["is_correct"] = False
                 else:
-                    # If not clearly true/false string, default to false and note in feedback
+                   
                     parsed_response["feedback"] += " (Note: 'is_correct' field from AI was not a clear boolean.)"
-                    parsed_response["is_correct"] = False # Default to false if ambiguous
-            else: # Not a bool or recognized string
+                    parsed_response["is_correct"] = False 
+            else: 
                  parsed_response["feedback"] += " (Note: 'is_correct' field from AI was not a boolean.)"
-                 parsed_response["is_correct"] = False # Default to false
+                 parsed_response["is_correct"] = False 
 
         return parsed_response
     except json.JSONDecodeError:

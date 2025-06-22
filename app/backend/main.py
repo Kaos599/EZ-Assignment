@@ -5,35 +5,44 @@ from typing import List
 import shutil
 import os
 import PyPDF2
+import uuid
+from contextlib import asynccontextmanager
 
 # Load environment variables from .env file
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    # dotenv not available, environment variables should be set manually
+   
     pass
 
-from app.utils.gemini_utils import generate_summary # Keep existing summary util
-# Remove the old Q&A util if it's fully replaced, or keep if used elsewhere (not in this plan)
-# from app.utils.gemini_utils import answer_question_from_document
+from app.utils.gemini_utils import generate_summary 
 
-# LangGraph imports
+
+
 from app.utils.graph_utils import ask_anything_graph_app, AskAnythingState
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage # For chat history typing
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage 
+from app.utils.mongo_utils import mongo_manager, init_mongodb, cleanup_mongodb
 
 # Updated document_store
 document_store = {
     "filename": None,
     "text": None,
     "summary": None,
-    "chat_history": [] # Initialize chat_history as an empty list
+    "chat_history": [],
+    "session_id": None
 }
 
 UPLOADS_DIR = "uploads"
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_mongodb()
+    yield
+    await cleanup_mongodb()
+
+app = FastAPI(lifespan=lifespan)
 
 async def get_document_text():
     if document_store["text"] is None:
@@ -44,6 +53,10 @@ async def get_chat_history() -> List[BaseMessage]:
     # Ensures chat_history is always a list, even if somehow becomes None
     return document_store.get("chat_history", [])
 
+def get_or_create_session_id() -> str:
+    if not document_store.get("session_id"):
+        document_store["session_id"] = str(uuid.uuid4())
+    return document_store["session_id"]
 
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
@@ -88,7 +101,8 @@ async def upload_document(file: UploadFile = File(...)):
         document_store["filename"] = filename
         document_store["text"] = extracted_text
         document_store["summary"] = None
-        document_store["chat_history"] = [] # Reset chat history for new document
+        document_store["chat_history"] = []
+        document_store["session_id"] = str(uuid.uuid4())
 
         current_summary = None
         summary_error_detail = None
@@ -101,6 +115,13 @@ async def upload_document(file: UploadFile = File(...)):
         except Exception as e:
             print(f"Unexpected error generating summary for {filename}: {str(e)}")
             summary_error_detail = str(e)
+
+        await mongo_manager.store_document(
+            filename=filename,
+            text=extracted_text,
+            summary=current_summary,
+            file_path=file_path
+        )
 
         if current_summary:
             return JSONResponse(
@@ -135,58 +156,63 @@ async def upload_document(file: UploadFile = File(...)):
 
 @app.post("/ask")
 async def ask_question_endpoint(
-    question: str, # Expecting question as a query parameter or form data
+    question: str, 
     doc_text: str = Depends(get_document_text),
     current_chat_history: List[BaseMessage] = Depends(get_chat_history)
 ):
     if not question or not question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-    # Prepare state for LangGraph
-    # Minimal comments: State preparation for graph.
+    session_id = get_or_create_session_id()
+    
+    if mongo_manager.is_connected and document_store.get("filename"):
+        stored_history = await mongo_manager.get_chat_history(session_id, document_store["filename"])
+        if stored_history:
+            current_chat_history = stored_history
+            document_store["chat_history"] = stored_history
+
+
     graph_input_state = AskAnythingState(
         document_text=doc_text,
         input_question=question,
-        chat_history=current_chat_history, # Pass current history
-        answer="" # Placeholder for the answer to be filled by the graph
+        chat_history=current_chat_history, 
+        answer="" 
     )
 
     try:
-        # Minimal comments: Graph invocation.
         final_graph_state = await ask_anything_graph_app.ainvoke(graph_input_state)
+        updated_history = final_graph_state.get("chat_history", [])
+        document_store["chat_history"] = updated_history
 
-        # Update the global document_store with the new chat history from the graph
-        # The graph itself appends to the history list passed in its state.
-        # The final_graph_state['chat_history'] will contain the full updated history.
-        document_store["chat_history"] = final_graph_state.get("chat_history", [])
+        if mongo_manager.is_connected and document_store.get("filename"):
+            await mongo_manager.store_chat_history(
+                session_id=session_id,
+                document_filename=document_store["filename"],
+                chat_history=updated_history
+            )
 
-        # For now, the response structure from /ask will just be the answer.
-        # Justification is part of the conversational flow but not explicitly structured out here.
-        # The prompt to the LLM in graph_utils asks it to be concise and answer directly.
+
         return JSONResponse(content={
             "answer": final_graph_state.get("answer", "No answer generated."),
             "justification": "Justification is part of the conversational answer. Review history for full context."
-            # Placeholder for justification. LangGraph's primary role here is memory.
-            # We might need to adjust graph_utils or add another LLM call if structured justification is critical *and separate* from the answer.
         })
     except Exception as e:
-        # Catch potential errors from graph invocation
+       
         print(f"Error during LangGraph invocation in /ask endpoint: {e}")
-        # Consider if any specific error details should be hidden from the client
+       
         raise HTTPException(status_code=500, detail=f"An error occurred while processing your question with the AI graph: {str(e)}")
 
 
 @app.get("/summary")
 async def get_summary_endpoint():
-    # ... (summary endpoint remains the same)
+   
     if document_store["text"] is None:
          raise HTTPException(status_code=404, detail="No document uploaded yet. Please upload a document first.")
     if document_store["summary"] is None:
         raise HTTPException(status_code=404, detail="Summary not available for the current document. It might have failed during generation.")
     return JSONResponse(content={"summary": document_store["summary"], "filename": document_store["filename"]})
 
-# Endpoints for /challenge and /evaluate remain the same as they don't use conversational memory yet
-# ... (challenge and evaluate endpoint definitions)
+
 from pydantic import BaseModel, Field
 from app.utils.gemini_utils import generate_challenge_questions, evaluate_user_answer
 
@@ -224,13 +250,27 @@ async def evaluate_user_answer_endpoint(request_data: EvaluationRequest, doc_tex
         print(f"Unexpected error in /evaluate endpoint: {e}")
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred while evaluating the answer: {str(e)}")
 
+@app.get("/health")
+async def health_check():
+    mongo_health = await mongo_manager.health_check()
+    return JSONResponse(content={
+        "status": "healthy",
+        "document_store": {
+            "current_document": document_store.get("filename"),
+            "has_text": document_store.get("text") is not None,
+            "has_summary": document_store.get("summary") is not None,
+            "chat_history_length": len(document_store.get("chat_history", []))
+        },
+        "mongodb": mongo_health
+    })
+
 @app.get("/")
 async def read_root():
     return {"message": "Backend is running. Current document: " + str(document_store.get("filename"))}
 
 if __name__ == "__main__":
     import uvicorn
-    # Get the host and port from environment variables, with defaults
+   
     HOST = os.getenv("BACKEND_HOST")
     PORT = int(os.getenv("BACKEND_PORT"))
     
